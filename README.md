@@ -1,7 +1,7 @@
 # App Traces Analysis Project
 
 To do:
-- add browser feature to transformer
+- cleanup transformer: remove handling of both formats
 - refactor file structure
 - add evaluation methods
 

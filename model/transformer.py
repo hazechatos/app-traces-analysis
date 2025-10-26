@@ -110,10 +110,10 @@ class TransformerBlock(nn.Module):
 
 class UsernameTransformer(nn.Module):
     """
-    Transformer model for username prediction from action sequences.
+    Transformer model for username prediction from action sequences with browser context.
     
-    During training: Takes (username, action_sequence) pairs
-    During inference: Takes action_sequence and predicts username
+    During training: Takes (username, action_sequence, browser) tuples
+    During inference: Takes (action_sequence, browser) and predicts username
     """
     
     def __init__(
@@ -125,23 +125,29 @@ class UsernameTransformer(nn.Module):
         d_ff: int = 2048,
         max_seq_len: int = 1000,
         dropout: float = 0.1,
-        n_usernames: int = None
+        n_usernames: int = None,
+        n_browsers: int = None
     ):
         super().__init__()
         
         self.d_model = d_model
         self.vocab_size = vocab_size
         self.n_usernames = n_usernames
+        self.n_browsers = n_browsers
         
         # Token embedding for action sequences
         self.token_embedding = nn.Embedding(vocab_size, d_model)
+        
+        # Browser embedding (for context)
+        if n_browsers is not None:
+            self.browser_embedding = nn.Embedding(n_browsers, d_model)
         
         # Username embedding (for training)
         if n_usernames is not None:
             self.username_embedding = nn.Embedding(n_usernames, d_model)
         
-        # Positional encoding
-        self.pos_encoding = PositionalEncoding(d_model, max_seq_len)
+        # Positional encoding (increased by 1 to account for browser token)
+        self.pos_encoding = PositionalEncoding(d_model, max_seq_len + 1)
         
         # Transformer blocks
         self.transformer_blocks = nn.ModuleList([
@@ -170,12 +176,13 @@ class UsernameTransformer(nn.Module):
         """Create padding mask for variable length sequences."""
         return (seq != 0).unsqueeze(1).unsqueeze(2)
     
-    def forward(self, action_sequence, username=None, training=True):
+    def forward(self, action_sequence, browser=None, username=None, training=True):
         """
-        Forward pass of the transformer.
+        Forward pass of the transformer with browser context.
         
         Args:
             action_sequence: Tensor of shape (batch_size, seq_len) with action token IDs
+            browser: Tensor of shape (batch_size,) with browser IDs
             username: Tensor of shape (batch_size,) with username IDs (only used during training)
             training: Whether in training mode
         
@@ -185,11 +192,24 @@ class UsernameTransformer(nn.Module):
         """
         batch_size, seq_len = action_sequence.shape
         
-        # Create padding mask
-        mask = self.create_padding_mask(action_sequence)
+        # Create browser token embeddings
+        if browser is not None and self.n_browsers is not None:
+            browser_emb = self.browser_embedding(browser) * math.sqrt(self.d_model)  # (batch_size, d_model)
+            browser_emb = browser_emb.unsqueeze(1)  # (batch_size, 1, d_model)
+        else:
+            # If no browser provided, create zero embeddings
+            browser_emb = torch.zeros(batch_size, 1, self.d_model, device=action_sequence.device)
         
-        # Token embeddings
-        x = self.token_embedding(action_sequence) * math.sqrt(self.d_model)
+        # Token embeddings for actions
+        action_emb = self.token_embedding(action_sequence) * math.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
+        
+        # Concatenate browser token at the beginning
+        x = torch.cat([browser_emb, action_emb], dim=1)  # (batch_size, seq_len + 1, d_model)
+        
+        # Create padding mask (extend for browser token)
+        action_mask = self.create_padding_mask(action_sequence)  # (batch_size, 1, 1, seq_len)
+        browser_mask = torch.ones(batch_size, 1, 1, 1, device=action_sequence.device)  # Browser token is never masked
+        mask = torch.cat([browser_mask, action_mask], dim=-1)  # (batch_size, 1, 1, seq_len + 1)
         
         # Add positional encoding
         x = self.pos_encoding(x)
@@ -202,11 +222,14 @@ class UsernameTransformer(nn.Module):
         # Apply layer norm
         x = self.layer_norm(x)
         
-        # Global average pooling over sequence length
-        # Use mask to ignore padding tokens
-        mask_expanded = mask.squeeze(1).squeeze(1).float()  # (batch_size, seq_len)
-        x_masked = x * mask_expanded.unsqueeze(-1)
-        pooled = x_masked.sum(dim=1) / mask_expanded.sum(dim=1, keepdim=True)
+        # Global average pooling over sequence length (excluding browser token)
+        # Use mask to ignore padding tokens, but exclude browser token from pooling
+        mask_expanded = mask.squeeze(1).squeeze(1).float()  # (batch_size, seq_len + 1)
+        # Only pool over action tokens (skip browser token at position 0)
+        action_tokens = x[:, 1:, :]  # (batch_size, seq_len, d_model)
+        action_mask = mask_expanded[:, 1:]  # (batch_size, seq_len)
+        x_masked = action_tokens * action_mask.unsqueeze(-1)
+        pooled = x_masked.sum(dim=1) / action_mask.sum(dim=1, keepdim=True)
         
         if training and username is not None:
             # Training mode: return both username logits and embeddings
@@ -217,12 +240,13 @@ class UsernameTransformer(nn.Module):
             username_logits = self.username_classifier(pooled)
             return username_logits
     
-    def predict_username(self, action_sequence):
+    def predict_username(self, action_sequence, browser=None):
         """
-        Predict username from action sequence (inference mode).
+        Predict username from action sequence and browser context (inference mode).
         
         Args:
             action_sequence: Tensor of shape (batch_size, seq_len) or (seq_len,)
+            browser: Tensor of shape (batch_size,) or scalar with browser IDs
         
         Returns:
             Predicted username logits and probabilities
@@ -232,8 +256,11 @@ class UsernameTransformer(nn.Module):
         if action_sequence.dim() == 1:
             action_sequence = action_sequence.unsqueeze(0)
         
+        if browser is not None and browser.dim() == 0:
+            browser = browser.unsqueeze(0)
+        
         with torch.no_grad():
-            username_logits = self.forward(action_sequence, training=False)
+            username_logits = self.forward(action_sequence, browser, training=False)
             username_probs = F.softmax(username_logits, dim=-1)
             
         return username_logits, username_probs
@@ -249,16 +276,18 @@ class UsernameTransformerTrainer:
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
         self.criterion = nn.CrossEntropyLoss()
     
-    def train_step(self, action_sequences: torch.Tensor, usernames: torch.Tensor):
+    def train_step(self, action_sequences: torch.Tensor, usernames: torch.Tensor, browsers: torch.Tensor = None):
         """Single training step."""
         self.model.train()
         
         action_sequences = action_sequences.to(self.device)
         usernames = usernames.to(self.device)
+        if browsers is not None:
+            browsers = browsers.to(self.device)
         
         self.optimizer.zero_grad()
         
-        username_logits, _ = self.model(action_sequences, usernames, training=True)
+        username_logits, _ = self.model(action_sequences, browsers, usernames, training=True)
         loss = self.criterion(username_logits, usernames)
         
         loss.backward()
@@ -266,15 +295,17 @@ class UsernameTransformerTrainer:
         
         return loss.item()
     
-    def evaluate(self, action_sequences, usernames):
+    def evaluate(self, action_sequences, usernames, browsers=None):
         """Evaluate model on validation data."""
         self.model.eval()
         
         action_sequences = action_sequences.to(self.device)
         usernames = usernames.to(self.device)
+        if browsers is not None:
+            browsers = browsers.to(self.device)
         
         with torch.no_grad():
-            username_logits = self.model(action_sequences, training=False)
+            username_logits = self.model(action_sequences, browsers, training=False)
             loss = self.criterion(username_logits, usernames)
             
             predictions = torch.argmax(username_logits, dim=-1)
@@ -283,11 +314,12 @@ class UsernameTransformerTrainer:
         return loss.item(), accuracy.item()
 
 # Example usage and training function
-def create_model(vocab_size, n_usernames, **kwargs):
+def create_model(vocab_size, n_usernames, n_browsers=None, **kwargs):
     """Create a UsernameTransformer model with default parameters."""
     return UsernameTransformer(
         vocab_size=vocab_size,
         n_usernames=n_usernames,
+        n_browsers=n_browsers,
         d_model=kwargs.get('d_model', 64),
         n_heads=kwargs.get('n_heads', 2),
         n_layers=kwargs.get('n_layers', 2),
@@ -298,12 +330,12 @@ def create_model(vocab_size, n_usernames, **kwargs):
 
 def train_model(model, train_data, val_data, epochs=50, batch_size=8, max_seq_len=100, device='cpu'):
     """
-    Train the UsernameTransformer model.
+    Train the UsernameTransformer model with browser context.
     
     Args:
         model: UsernameTransformer model
-        train_data: (action_sequences, usernames) tuple
-        val_data: (action_sequences, usernames) tuple  
+        train_data: (action_sequences, usernames, browsers) tuple or (action_sequences, usernames) tuple
+        val_data: (action_sequences, usernames, browsers) tuple or (action_sequences, usernames) tuple  
         epochs: Number of training epochs
         batch_size: Batch size for training (reduced to prevent memory issues)
         max_seq_len: Maximum sequence length to process
@@ -311,8 +343,18 @@ def train_model(model, train_data, val_data, epochs=50, batch_size=8, max_seq_le
     """
     trainer = UsernameTransformerTrainer(model, device=device)
     
-    train_sequences, train_usernames = train_data
-    val_sequences, val_usernames = val_data
+    # Handle both old format (2 elements) and new format (3 elements)
+    if len(train_data) == 3:
+        train_sequences, train_usernames, train_browsers = train_data
+    else:
+        train_sequences, train_usernames = train_data
+        train_browsers = None
+        
+    if len(val_data) == 3:
+        val_sequences, val_usernames, val_browsers = val_data
+    else:
+        val_sequences, val_usernames = val_data
+        val_browsers = None
     
     print(f"Training on {len(train_sequences)} samples")
     print(f"Validation on {len(val_sequences)} samples")
@@ -343,6 +385,7 @@ def train_model(model, train_data, val_data, epochs=50, batch_size=8, max_seq_le
         for i in range(0, len(train_sequences), batch_size):
             batch_sequences = train_sequences[i:i+batch_size]
             batch_usernames = train_usernames[i:i+batch_size]
+            batch_browsers = train_browsers[i:i+batch_size] if train_browsers is not None else None
             
             # Convert to tensors and pad sequences
             batch_sequences = torch.nn.utils.rnn.pad_sequence(
@@ -351,7 +394,12 @@ def train_model(model, train_data, val_data, epochs=50, batch_size=8, max_seq_le
                 padding_value=0
             )
             
-            loss = trainer.train_step(batch_sequences, batch_usernames)
+            batch_usernames = torch.tensor(batch_usernames, dtype=torch.long)
+            
+            if batch_browsers is not None:
+                batch_browsers = torch.tensor(batch_browsers, dtype=torch.long)
+            
+            loss = trainer.train_step(batch_sequences, batch_usernames, batch_browsers)
             train_loss += loss
             num_batches += 1
         
@@ -365,6 +413,7 @@ def train_model(model, train_data, val_data, epochs=50, batch_size=8, max_seq_le
         for i in range(0, len(val_sequences), batch_size):
             val_batch_sequences = val_sequences[i:i+batch_size]
             val_batch_usernames = val_usernames[i:i+batch_size]
+            val_batch_browsers = val_browsers[i:i+batch_size] if val_browsers is not None else None
             
             # Convert to tensors and pad sequences
             val_batch_tensor = torch.nn.utils.rnn.pad_sequence(
@@ -373,7 +422,12 @@ def train_model(model, train_data, val_data, epochs=50, batch_size=8, max_seq_le
                 padding_value=0
             )
             
-            batch_loss, batch_accuracy = trainer.evaluate(val_batch_tensor, val_batch_usernames)
+            val_batch_usernames = torch.tensor(val_batch_usernames, dtype=torch.long)
+            
+            if val_batch_browsers is not None:
+                val_batch_browsers = torch.tensor(val_batch_browsers, dtype=torch.long)
+            
+            batch_loss, batch_accuracy = trainer.evaluate(val_batch_tensor, val_batch_usernames, val_batch_browsers)
             val_loss += batch_loss
             val_accuracy += batch_accuracy
             num_val_batches += 1
