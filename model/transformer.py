@@ -372,7 +372,7 @@ def train_model(model, train_data, val_data, epochs=50, batch_size=8, max_seq_le
     """
     username_tokens = train_data[1]
     weights = calculate_class_weights(username_tokens)
-    trainer = UsernameTransformerTrainer(model, device=device, weights=weights)
+    trainer = UsernameTransformerTrainer(model, device=device, class_weights=weights)
     
     # Handle both old format (2 elements) and new format (3 elements)
     if len(train_data) == 3:
