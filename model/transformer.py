@@ -268,13 +268,19 @@ class UsernameTransformer(nn.Module):
 class UsernameTransformerTrainer:
     """Training utilities for the UsernameTransformer."""
     
-    def __init__(self, model, learning_rate=1e-5, device='cpu'):
+    def __init__(self, model, learning_rate=1e-5, device='cpu', class_weights=None):
         self.model = model
         self.device = device
         self.model.to(device)
         
         self.optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-        self.criterion = nn.CrossEntropyLoss()
+        
+        # Use class weights if provided, otherwise use standard CrossEntropyLoss
+        if class_weights is not None:
+            class_weights = class_weights.to(device)
+            self.criterion = nn.CrossEntropyLoss(weight=class_weights)
+        else:
+            self.criterion = nn.CrossEntropyLoss()
     
     def train_step(self, action_sequences: torch.Tensor, usernames: torch.Tensor, browsers: torch.Tensor = None):
         """Single training step."""
@@ -313,6 +319,29 @@ class UsernameTransformerTrainer:
         
         return loss.item(), accuracy.item()
 
+# Helper function to calculate class weights
+def calculate_class_weights(username_tokens):
+    """
+    Calculate class weights for imbalanced username data.
+    
+    Args:
+        username_tokens: List of username token IDs
+        
+    Returns:
+        class_weights: Tensor of weights for each class
+    """
+    username_counts = torch.bincount(torch.tensor(username_tokens, dtype=torch.long))
+    total_samples = len(username_tokens)
+    num_classes = len(username_counts)
+    
+    # Calculate inverse frequency weights
+    class_weights = total_samples / (num_classes * username_counts.float())
+    
+    # Normalize weights
+    class_weights = class_weights / class_weights.sum() * num_classes
+    
+    return class_weights
+
 # Example usage and training function
 def create_model(vocab_size, n_usernames, n_browsers=None, **kwargs):
     """Create a UsernameTransformer model with default parameters."""
@@ -341,7 +370,9 @@ def train_model(model, train_data, val_data, epochs=50, batch_size=8, max_seq_le
         max_seq_len: Maximum sequence length to process
         device: Device to train on
     """
-    trainer = UsernameTransformerTrainer(model, device=device)
+    username_tokens = train_data[1]
+    weights = calculate_class_weights(username_tokens)
+    trainer = UsernameTransformerTrainer(model, device=device, weights=weights)
     
     # Handle both old format (2 elements) and new format (3 elements)
     if len(train_data) == 3:
