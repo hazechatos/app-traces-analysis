@@ -18,11 +18,13 @@ class PositionalEncoding(nn.Module):
         
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
+        # Store as batch-first (1, max_len, d_model) to match module usage
+        pe = pe.unsqueeze(0)
         self.register_buffer('pe', pe)
     
     def forward(self, x):
-        return x + self.pe[:x.size(0), :]
+        # x: (batch_size, seq_len, d_model)
+        return x + self.pe[:, :x.size(1), :]
 
 class MultiHeadAttention(nn.Module):
     """Multi-head attention mechanism."""
@@ -229,7 +231,11 @@ class UsernameTransformer(nn.Module):
         action_tokens = x[:, 1:, :]  # (batch_size, seq_len, d_model)
         action_mask = mask_expanded[:, 1:]  # (batch_size, seq_len)
         x_masked = action_tokens * action_mask.unsqueeze(-1)
-        pooled = x_masked.sum(dim=1) / action_mask.sum(dim=1, keepdim=True)
+        denom = action_mask.sum(dim=1, keepdim=True)
+        zero_mask = (denom == 0)
+        denom = denom.clamp(min=1.0)
+        pooled = x_masked.sum(dim=1) / denom
+        pooled = pooled.masked_fill(zero_mask, 0.0)
         
         if training and username is not None:
             # Training mode: return both username logits and embeddings
