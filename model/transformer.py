@@ -173,9 +173,14 @@ class UsernameTransformer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(d_model)
         
-        # Classification head for username prediction
+        # Classification head for username prediction (MLP)
         if n_usernames is not None:
-            self.username_classifier = nn.Linear(d_model, n_usernames)
+            self.username_classifier = nn.Sequential(
+                nn.Linear(d_model, d_model),
+                nn.ReLU(),
+                nn.Dropout(dropout),
+                nn.Linear(d_model, n_usernames)
+            )
         
         # Initialize weights
         self.init_weights()
