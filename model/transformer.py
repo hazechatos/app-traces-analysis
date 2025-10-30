@@ -150,7 +150,7 @@ class UsernameTransformer(nn.Module):
         self.n_browsers = n_browsers
         
         # Token embedding for action sequences
-        self.token_embedding = nn.Embedding(vocab_size, d_model)
+        self.token_embedding = nn.Embedding(vocab_size, d_model, padding_idx=0)
         
         # Browser embedding (for context)
         if n_browsers is not None:
