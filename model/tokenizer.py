@@ -1,4 +1,5 @@
 from .parser import parse_action_string
+import re
 import pandas as pd
 import numpy as np
 
@@ -7,12 +8,20 @@ def tokenize_action_sequence(actions: pd.DataFrame):
     Tokenize sequences of parsed actions for transformer input
     """
     all_tokens = []
-    token_to_idx = {}
-    idx_counter = 0
+    # Reserve index 0 for padding and map timestep actions to padding
+    PAD_TOKEN = '<PAD>'
+    TIMESTEP_PATTERN = re.compile(r'^t\d+$')
+    token_to_idx = {PAD_TOKEN: 0}
+    idx_counter = 1
     
     for session in actions.itertuples(index=False, name=None):
         sequence_tokens = []
         for action in session:
+            # Map raw timestep markers to padding token
+            if isinstance(action, str) and TIMESTEP_PATTERN.match(action.strip()):
+                sequence_tokens.append(0)
+                continue
+            
             # Parse action into tuple
             parsed = parse_action_string(action)
             
