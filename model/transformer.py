@@ -321,7 +321,7 @@ class UsernameTransformerTrainer:
         
         loss.backward()
         # Check gradients before optimizer step
-        check_gradient_flow(self.model)
+        # check_gradient_flow(self.model)
         self.optimizer.step()
         
         return loss.item()
@@ -342,7 +342,7 @@ class UsernameTransformerTrainer:
             predictions = torch.argmax(username_logits, dim=-1)
             accuracy = (predictions == usernames).float().mean()
         
-        return loss.item(), accuracy.item()
+        return loss.item(), accuracy.item(), predictions
 
 # Helper function to calculate class weights
 def calculate_class_weights(username_tokens):
@@ -465,6 +465,7 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
         val_loss = 0
         val_accuracy = 0
         num_val_batches = 0
+        all_predictions = []
         
         for i in range(0, len(val_sequences), batch_size):
             val_batch_sequences = val_sequences[i:i+batch_size]
@@ -483,17 +484,39 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
             if val_batch_browsers is not None:
                 val_batch_browsers = torch.tensor(val_batch_browsers, dtype=torch.long)
             
-            batch_loss, batch_accuracy = trainer.evaluate(val_batch_tensor, val_batch_usernames, val_batch_browsers)
+            batch_loss, batch_accuracy, batch_predictions = trainer.evaluate(val_batch_tensor, val_batch_usernames, val_batch_browsers)
             val_loss += batch_loss
             val_accuracy += batch_accuracy
+            all_predictions.append(batch_predictions.cpu())
             num_val_batches += 1
         
         val_loss = val_loss / num_val_batches
         val_accuracy = val_accuracy / num_val_batches
         
+        # Collect all predictions and calculate frequencies
+        all_predictions = torch.cat(all_predictions, dim=0)
+        # Determine minimum length for bincount
+        minlength = model.n_usernames if model.n_usernames is not None else (all_predictions.max().item() + 1 if len(all_predictions) > 0 else 1)
+        prediction_counts = torch.bincount(all_predictions, minlength=minlength)
+        total_predictions = len(all_predictions)
+        prediction_proportions = prediction_counts.float() / total_predictions
+        
+        # Get top predicted usernames (only consider usernames that were actually predicted)
+        non_zero_mask = prediction_counts > 0
+        if non_zero_mask.any():
+            top_k = min(5, non_zero_mask.sum().item())
+            top_proportions, top_indices = torch.topk(prediction_proportions, k=top_k)
+        else:
+            top_proportions = torch.tensor([])
+            top_indices = torch.tensor([], dtype=torch.long)
+        
         if epoch % 10 == 0:
             print(f"Epoch {epoch:3d}: Train Loss: {avg_train_loss:.4f}, "
                   f"Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
+            if len(top_indices) > 0:
+                print(f"  Top predicted usernames (by frequency):")
+                for idx, (username_idx, proportion) in enumerate(zip(top_indices.tolist(), top_proportions.tolist())):
+                    print(f"    {idx+1}. Username {username_idx}: {proportion:.2%} ({prediction_counts[username_idx].item()}/{total_predictions})")
     
     return model
 
