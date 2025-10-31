@@ -320,6 +320,8 @@ class UsernameTransformerTrainer:
         loss = self.criterion(username_logits, usernames)
         
         loss.backward()
+        # Check gradients before optimizer step
+        check_gradient_flow(self.model)
         self.optimizer.step()
         
         return loss.item()
@@ -496,3 +498,46 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
     return model
 
 
+
+
+def check_gradient_flow(model):
+    """Check if gradients are flowing through the model."""
+    print("\n=== Gradient Flow Check ===")
+    total_norm = 0
+    param_norm = 0
+    zero_grad_count = 0
+    
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            # Check if gradient exists
+            if param.grad is None:
+                print(f"⚠️  {name}: NO GRADIENT (None)")
+                zero_grad_count += 1
+                continue
+            
+            # Check gradient norm
+            param_norm = param.data.norm().item()
+            grad_norm = param.grad.norm().item()
+            
+            if grad_norm == 0:
+                print(f"⚠️  {name}: ZERO gradient (norm=0)")
+                zero_grad_count += 1
+            elif grad_norm < 1e-7:
+                print(f"⚠️  {name}: VANISHING gradient (norm={grad_norm:.2e})")
+            elif grad_norm > 100:
+                print(f"⚠️  {name}: EXPLODING gradient (norm={grad_norm:.2e})")
+            else:
+                print(f"✓  {name}: OK (grad_norm={grad_norm:.4f}, param_norm={param_norm:.4f})")
+            
+            # Ratio of gradient to parameter
+            ratio = grad_norm / (param_norm + 1e-10)
+            if ratio < 1e-6:
+                print(f"   ⚠️  Very small gradient/param ratio: {ratio:.2e}")
+            
+            total_norm += grad_norm ** 2
+    
+    total_norm = total_norm ** 0.5
+    print(f"\nTotal gradient norm: {total_norm:.4f}")
+    print(f"Parameters with zero/None gradients: {zero_grad_count}")
+    
+    return total_norm, zero_grad_count
