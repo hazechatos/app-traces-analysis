@@ -347,7 +347,7 @@ class UsernameTransformerTrainer:
 # Helper function to calculate class weights
 def calculate_class_weights(username_tokens):
     """
-    Calculate class weights for imbalanced username data.
+    Calculate class weights for imbalanced username data using sklearn-style balanced weights.
     
     Args:
         username_tokens: List of username token IDs
@@ -359,11 +359,9 @@ def calculate_class_weights(username_tokens):
     total_samples = len(username_tokens)
     num_classes = len(username_counts)
     
-    # Calculate inverse frequency weights
+    # sklearn balanced weights: n_samples / (n_classes * np.bincount(y))
+    # No normalization - let PyTorch handle the scaling, stronger weights help with severe imbalance
     class_weights = total_samples / (num_classes * username_counts.float())
-    
-    # Normalize weights
-    class_weights = class_weights / class_weights.sum() * num_classes
     
     return class_weights
 
