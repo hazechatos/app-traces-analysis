@@ -34,8 +34,11 @@ def tokenize_action_sequence(actions: pd.DataFrame, existing_token_to_idx: dict 
             
             # Add to vocabulary if new
             if token_str not in token_to_idx:
-                token_to_idx[token_str] = idx_counter
-                idx_counter += 1
+                if training:
+                    token_to_idx[token_str] = idx_counter
+                    idx_counter += 1
+                else:
+                    continue # do not add an unkown token
             
             sequence_tokens.append(token_to_idx[token_str])
         
