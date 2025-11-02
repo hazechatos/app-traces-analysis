@@ -3,14 +3,19 @@ import re
 import pandas as pd
 import numpy as np
 
-def tokenize_action_sequence(actions: pd.DataFrame):
+def tokenize_action_sequence(actions: pd.DataFrame, existing_token_to_idx: dict = None, training = True):
     """
     Tokenize sequences of parsed actions for transformer input
     """
     all_tokens = []
     TIMESTEP_PATTERN = re.compile(r'^t\d+$')
-    token_to_idx = {}
-    idx_counter = 1
+
+    if training:
+        token_to_idx = {}
+    else:
+        token_to_idx = existing_token_to_idx
+
+    idx_counter = len(token_to_idx) + 1
     
     for session in actions.itertuples(index=False, name=None):
         sequence_tokens = []
@@ -38,7 +43,7 @@ def tokenize_action_sequence(actions: pd.DataFrame):
     
     return all_tokens, token_to_idx
 
-def tokenize_browser_data(browsers: pd.Series):
+def tokenize_browser_data(browsers: pd.Series, existing_browser_to_idx: dict = None, training = True):
     """
     Tokenize browser data for transformer input
     
@@ -50,8 +55,13 @@ def tokenize_browser_data(browsers: pd.Series):
         browser_to_idx: Dictionary mapping browser names to token IDs
     """
     browser_tokens = []
-    browser_to_idx = {}
-    idx_counter = 0
+    
+    if training:
+        browser_to_idx = {}
+    else:
+        browser_to_idx = existing_browser_to_idx
+
+    idx_counter = len(browser_to_idx)
     
     for browser in browsers:
         # Convert browser to string and handle missing values

@@ -2,7 +2,7 @@ import pandas as pd
 import os
 import csv
 
-def reader(ds_name: str) -> pd.DataFrame:
+def reader(ds_name: str, training=True) -> pd.DataFrame:
     """Robust CSV loader for files where rows have variable field counts.
     Uses Python's csv.reader to parse lines, pads rows to the maximum column count with empty strings,
     and returns a pandas DataFrame with missing values replaced by empty strings.
@@ -20,11 +20,19 @@ def reader(ds_name: str) -> pd.DataFrame:
 
     # Fill missing cells to make it a table, and add length and last time value
     max_cols = max(len(r) for r in rows)
-    padded = [[r[0]] + [r[1]] + [len(r) - 2] + r[2:] + [''] * (max_cols - len(r)) for r in rows]
+    if training:
+        # order: username, browser, action sequence length, sequence, paddings
+        padded = [[r[0]] + [r[1]] + [len(r) - 2] + r[2:] + [''] * (max_cols - len(r)) for r in rows] 
+    else:
+        # order: browser, action sequence length, sequence, paddings
+        padded = [[r[0]] + [len(r) - 1] + r[1:] + [''] * (max_cols - len(r)) for r in rows]
     df = pd.DataFrame(padded)
     df = df.fillna('')
 
     # Rename columns
-    rename_map = {col: ('util' if col == 0 else 'browser' if col == 1 else 'sequence_length' if col == 2  else f'action_{col-2}') for col in df.columns}
+    if training:
+        rename_map = {col: ('util' if col == 0 else 'browser' if col == 1 else 'sequence_length' if col == 2  else f'action_{col-2}') for col in df.columns}
+    else:
+        rename_map = {col: ('browser' if col == 0 else 'sequence_length' if col == 1  else f'action_{col-1}') for col in df.columns}
     df.rename(columns=rename_map, inplace=True)
     return df
