@@ -17,10 +17,14 @@ def reader(ds_name: str) -> pd.DataFrame:
     if not rows:
         print(f"No rows read from {path}")
         return pd.DataFrame()
+
+    # Fill missing cells to make it a table, and add length and last time value
     max_cols = max(len(r) for r in rows)
-    padded = [r + [''] * (max_cols - len(r)) for r in rows]
+    padded = [[r[0]] + [r[1]] + [len(r) - 2] + r[2:] + [''] * (max_cols - len(r)) for r in rows]
     df = pd.DataFrame(padded)
     df = df.fillna('')
-    rename_map = {col: ('util' if col == 0 else 'browser' if col == 1 else f'action_{col-1}') for col in df.columns}
+
+    # Rename columns
+    rename_map = {col: ('util' if col == 0 else 'browser' if col == 1 else 'sequence_length' if col == 2  else f'action_{col-2}') for col in df.columns}
     df.rename(columns=rename_map, inplace=True)
     return df
