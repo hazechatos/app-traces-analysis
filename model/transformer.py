@@ -153,12 +153,10 @@ class UsernameTransformer(nn.Module):
         self.token_embedding = nn.Embedding(vocab_size, d_model, padding_idx=0)
         
         # Browser embedding (for context)
-        if n_browsers is not None:
-            self.browser_embedding = nn.Embedding(n_browsers, d_model)
+        self.browser_embedding = nn.Embedding(n_browsers, d_model)
         
         # Username embedding (for training)
-        if n_usernames is not None:
-            self.username_embedding = nn.Embedding(n_usernames, d_model)
+        self.username_embedding = nn.Embedding(n_usernames, d_model)
         
         # Positional encoding (increased by 1 to account for browser token)
         self.pos_encoding = PositionalEncoding(d_model, max_seq_len + 1)
@@ -212,13 +210,9 @@ class UsernameTransformer(nn.Module):
         batch_size, seq_len = action_sequence.shape
         
         # Create browser token embeddings
-        if browser is not None and self.n_browsers is not None:
-            browser_emb = self.browser_embedding(browser) * math.sqrt(self.d_model)  # (batch_size, d_model)
-            browser_emb = browser_emb.unsqueeze(1)  # (batch_size, 1, d_model)
-        else:
-            # If no browser provided, create zero embeddings
-            browser_emb = torch.zeros(batch_size, 1, self.d_model, device=action_sequence.device)
-        
+        browser_emb = self.browser_embedding(browser) * math.sqrt(self.d_model)  # (batch_size, d_model)
+        browser_emb = browser_emb.unsqueeze(1)  # (batch_size, 1, d_model)     
+
         # Token embeddings for actions
         action_emb = self.token_embedding(action_sequence) * math.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
         
@@ -311,8 +305,7 @@ class UsernameTransformerTrainer:
         
         action_sequences = action_sequences.to(self.device)
         usernames = usernames.to(self.device)
-        if browsers is not None:
-            browsers = browsers.to(self.device)
+        browsers = browsers.to(self.device)
         
         self.optimizer.zero_grad()
         
@@ -332,8 +325,7 @@ class UsernameTransformerTrainer:
         
         action_sequences = action_sequences.to(self.device)
         usernames = usernames.to(self.device)
-        if browsers is not None:
-            browsers = browsers.to(self.device)
+        browsers = browsers.to(self.device)
         
         with torch.no_grad():
             username_logits = self.model(action_sequences, browsers, training=False)
@@ -397,18 +389,8 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
     weights = calculate_class_weights(username_tokens)
     trainer = UsernameTransformerTrainer(model, learning_rate=learning_rate, device=device, class_weights=weights)
     
-    # Handle both old format (2 elements) and new format (3 elements)
-    if len(train_data) == 3:
-        train_sequences, train_usernames, train_browsers = train_data
-    else:
-        train_sequences, train_usernames = train_data
-        train_browsers = None
-        
-    if len(val_data) == 3:
-        val_sequences, val_usernames, val_browsers = val_data
-    else:
-        val_sequences, val_usernames = val_data
-        val_browsers = None
+    train_sequences, train_usernames, train_browsers = train_data
+    val_sequences, val_usernames, val_browsers = val_data
     
     print(f"Training on {len(train_sequences)} samples")
     print(f"Validation on {len(val_sequences)} samples")
@@ -439,7 +421,7 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
         for i in range(0, len(train_sequences), batch_size):
             batch_sequences = train_sequences[i:i+batch_size]
             batch_usernames = train_usernames[i:i+batch_size]
-            batch_browsers = train_browsers[i:i+batch_size] if train_browsers is not None else None
+            batch_browsers = train_browsers[i:i+batch_size]
             
             # Convert to tensors and pad sequences
             batch_sequences = torch.nn.utils.rnn.pad_sequence(
@@ -450,8 +432,7 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
             
             batch_usernames = torch.tensor(batch_usernames, dtype=torch.long)
             
-            if batch_browsers is not None:
-                batch_browsers = torch.tensor(batch_browsers, dtype=torch.long)
+            batch_browsers = torch.tensor(batch_browsers, dtype=torch.long)
             
             loss = trainer.train_step(batch_sequences, batch_usernames, batch_browsers)
             train_loss += loss
@@ -468,7 +449,7 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
         for i in range(0, len(val_sequences), batch_size):
             val_batch_sequences = val_sequences[i:i+batch_size]
             val_batch_usernames = val_usernames[i:i+batch_size]
-            val_batch_browsers = val_browsers[i:i+batch_size] if val_browsers is not None else None
+            val_batch_browsers = val_browsers[i:i+batch_size]
             
             # Convert to tensors and pad sequences
             val_batch_tensor = torch.nn.utils.rnn.pad_sequence(
@@ -479,8 +460,7 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
             
             val_batch_usernames = torch.tensor(val_batch_usernames, dtype=torch.long)
             
-            if val_batch_browsers is not None:
-                val_batch_browsers = torch.tensor(val_batch_browsers, dtype=torch.long)
+            val_batch_browsers = torch.tensor(val_batch_browsers, dtype=torch.long)
             
             batch_loss, batch_accuracy, batch_predictions = trainer.evaluate(val_batch_tensor, val_batch_usernames, val_batch_browsers)
             val_loss += batch_loss
