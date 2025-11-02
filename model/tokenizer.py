@@ -10,7 +10,7 @@ def tokenize_action_sequence(actions: pd.DataFrame):
     all_tokens = []
     TIMESTEP_PATTERN = re.compile(r'^t\d+$')
     token_to_idx = {}
-    idx_counter = 0
+    idx_counter = 1
     
     for session in actions.itertuples(index=False, name=None):
         sequence_tokens = []
