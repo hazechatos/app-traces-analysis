@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from sklearn.metrics import f1_score
 
 class PositionalEncoding(nn.Module):
     """Positional encoding for transformer input sequences."""
@@ -333,8 +334,13 @@ class UsernameTransformerTrainer:
             
             predictions = torch.argmax(username_logits, dim=-1)
             accuracy = (predictions == usernames).float().mean()
+            
+            # Calculate macro-F1 score
+            predictions_cpu = predictions.cpu().numpy()
+            usernames_cpu = usernames.cpu().numpy()
+            macro_f1 = f1_score(usernames_cpu, predictions_cpu, average='macro', zero_division=0)
         
-        return loss.item(), accuracy.item(), predictions
+        return loss.item(), accuracy.item(), macro_f1, predictions
 
 # Helper function to calculate class weights
 def calculate_class_weights(username_tokens):
@@ -445,6 +451,7 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
         val_accuracy = 0
         num_val_batches = 0
         all_predictions = []
+        all_true_labels = []
         
         for i in range(0, len(val_sequences), batch_size):
             val_batch_sequences = val_sequences[i:i+batch_size]
@@ -462,17 +469,20 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
             
             val_batch_browsers = torch.tensor(val_batch_browsers, dtype=torch.long)
             
-            batch_loss, batch_accuracy, batch_predictions = trainer.evaluate(val_batch_tensor, val_batch_usernames, val_batch_browsers)
+            batch_loss, batch_accuracy, batch_macro_f1, batch_predictions = trainer.evaluate(val_batch_tensor, val_batch_usernames, val_batch_browsers)
             val_loss += batch_loss
             val_accuracy += batch_accuracy
             all_predictions.append(batch_predictions.cpu())
+            all_true_labels.append(val_batch_usernames.cpu())
             num_val_batches += 1
         
         val_loss = val_loss / num_val_batches
         val_accuracy = val_accuracy / num_val_batches
         
-        # Collect all predictions and calculate frequencies
+        # Calculate overall macro-F1 on full validation set
         all_predictions = torch.cat(all_predictions, dim=0)
+        all_true_labels = torch.cat(all_true_labels, dim=0)
+        val_macro_f1 = f1_score(all_true_labels.numpy(), all_predictions.numpy(), average='macro', zero_division=0)
         # Determine minimum length for bincount
         minlength = model.n_usernames if model.n_usernames is not None else (all_predictions.max().item() + 1 if len(all_predictions) > 0 else 1)
         prediction_counts = torch.bincount(all_predictions, minlength=minlength)
@@ -490,7 +500,7 @@ def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batc
         
         if epoch % 10 == 0:
             print(f"Epoch {epoch:3d}: Train Loss: {avg_train_loss:.4f}, "
-                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}")
+                  f"Val Loss: {val_loss:.4f}, Val Acc: {val_accuracy:.4f}, Val Macro-F1: {val_macro_f1:.4f}")
             if len(top_indices) > 0:
                 print(f"  Top predicted usernames (by frequency):")
                 for idx, (username_idx, proportion) in enumerate(zip(top_indices.tolist(), top_proportions.tolist())):
