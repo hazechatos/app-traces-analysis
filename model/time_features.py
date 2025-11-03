@@ -28,3 +28,38 @@ def compute_time_features(actions: pd.DataFrame, sequence_lengths: pd.DataFrame)
         speeds.append(speed)
 
     return pd.DataFrame({'duration': durations, 'speed': speeds})
+
+
+def bucketize_time_features(time_features: pd.DataFrame, n_buckets: int = 8):
+    """
+    Bucketize time features (duration and speed) into discrete bins for tokenization.
+    
+    Args:
+        time_features: DataFrame with 'duration' and 'speed' columns
+        n_buckets: Number of buckets to create for each feature (default: 20)
+    
+    Returns:
+        DataFrame with 'duration_bucket' and 'speed_bucket' columns containing bucket indices
+    """
+    result = pd.DataFrame()
+    
+    # Bucketize duration using quantile-based binning (handles skewness well)
+    result['duration_bucket'] = pd.qcut(
+        time_features['duration'], 
+        q=n_buckets, 
+        labels=False, 
+        duplicates='drop'
+    )
+    
+    # Bucketize speed using quantile-based binning
+    result['speed_bucket'] = pd.qcut(
+        time_features['speed'], 
+        q=n_buckets, 
+        labels=False, 
+        duplicates='drop'
+    )
+    
+    # Fill any NaN values (shouldn't happen with qcut, but just in case)
+    result = result.fillna(0).astype(int)
+    
+    return result
