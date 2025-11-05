@@ -71,24 +71,59 @@ class MultiHeadAttention(nn.Module):
             # Expand mask to match scores shape: (batch_size, n_heads, seq_len, seq_len)
             # mask comes in as (batch_size, 1, 1, seq_len) - indicates which key positions are valid
             # We need to mask out positions where the key (last dimension) is padding
-            # Expand mask: (batch_size, 1, 1, seq_len) -> (batch_size, n_heads, seq_len, seq_len)
-            # where each query position has the same mask values (masking padding keys)
+            # Ensure mask is on the same device as scores
+            mask = mask.to(scores.device)
+            
+            # Get dimensions from scores
+            batch_size, n_heads, seq_len_q, seq_len_k = scores.shape
+            
+            # Validate mask batch size matches
+            if mask.size(0) != batch_size:
+                raise RuntimeError(f"Mask batch size {mask.size(0)} does not match scores batch size {batch_size}")
+            
             if mask.dim() == 4:
                 # mask shape: (batch_size, 1, 1, seq_len)
-                # Get seq_len from scores to ensure matching
-                seq_len_q, seq_len_k = scores.size(-2), scores.size(-1)
                 # Remove middle dimensions: (batch_size, 1, 1, seq_len) -> (batch_size, seq_len)
-                mask_1d = mask.squeeze(1).squeeze(1)  # (batch_size, seq_len_k)
-                # Expand to full attention matrix shape: (batch_size, n_heads, seq_len_q, seq_len_k)
-                # For each query position, apply the same key mask
-                mask_expanded = mask_1d.unsqueeze(1).unsqueeze(1)  # (batch_size, 1, 1, seq_len_k)
-                mask_expanded = mask_expanded.expand(-1, self.n_heads, seq_len_q, -1)  # (batch_size, n_heads, seq_len_q, seq_len_k)
+                mask_1d = mask.squeeze(1).squeeze(1)  # (batch_size, seq_len_original)
+                
+                # Clamp mask values to 0 or 1 (in case of any floating point issues)
+                mask_1d = (mask_1d > 0.5).float()
+                
+                # Ensure mask_1d matches seq_len_k (trim if too long, pad if too short)
+                if mask_1d.size(-1) != seq_len_k:
+                    if mask_1d.size(-1) > seq_len_k:
+                        mask_1d = mask_1d[:, :seq_len_k]
+                    else:
+                        # Pad with zeros (padding tokens)
+                        padding_size = seq_len_k - mask_1d.size(-1)
+                        padding = torch.zeros(batch_size, padding_size, 
+                                             device=mask_1d.device, dtype=mask_1d.dtype)
+                        mask_1d = torch.cat([mask_1d, padding], dim=-1)
+                
+                # Create 2D mask: for each query position, mask all padding key positions
+                # mask_1d: (batch_size, seq_len_k) 
+                # We want: (batch_size, n_heads, seq_len_q, seq_len_k)
+                # where each row (query position) has the same mask values
+                mask_2d = mask_1d.unsqueeze(1).unsqueeze(1)  # (batch_size, 1, 1, seq_len_k)
+                # Use repeat instead of expand to ensure contiguous tensor
+                mask_expanded = mask_2d.repeat(1, n_heads, seq_len_q, 1)  # (batch_size, n_heads, seq_len_q, seq_len_k)
             else:
-                # Fallback: try to expand if possible
-                mask_expanded = mask.expand(-1, self.n_heads, -1, -1) if mask.dim() == 4 else mask
+                # Fallback: try to handle other shapes
+                if mask.dim() == 4:
+                    mask_expanded = mask.repeat(1, n_heads, 1, 1)
+                else:
+                    raise ValueError(f"Unexpected mask shape: {mask.shape}, expected 4D tensor")
             
-            # Apply mask: mask out positions where mask == 0
-            scores = scores.masked_fill(mask_expanded == 0, -1e9)
+            # Ensure shapes match exactly
+            if mask_expanded.shape != scores.shape:
+                raise RuntimeError(f"Mask shape {mask_expanded.shape} does not match scores shape {scores.shape}")
+            
+            # Convert mask to boolean: 1 -> True (keep), 0 -> False (mask out)
+            # Ensure the mask is contiguous and properly typed
+            mask_bool = (mask_expanded > 0.5).contiguous()
+            
+            # Apply mask: mask out positions where mask_bool is False (padding positions)
+            scores = scores.masked_fill(~mask_bool, -1e9)
         
         attention_weights = F.softmax(scores, dim=-1)
         attention_weights = self.dropout(attention_weights)
