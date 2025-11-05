@@ -132,19 +132,40 @@ class MultiHeadAttention(nn.Module):
         return output, attention_weights
     
     def forward(self, query, key, value, mask=None):
+        # Validate input shapes
+        if query.dim() != 3 or key.dim() != 3 or value.dim() != 3:
+            raise ValueError(f"query, key, value must be 3D tensors (batch, seq, d_model), "
+                           f"got shapes: {query.shape}, {key.shape}, {value.shape}")
+        
         batch_size = query.size(0)
+        seq_len = query.size(1)
+        
+        # Ensure all inputs are on the same device
+        device = query.device
+        key = key.to(device)
+        value = value.to(device)
+        if mask is not None:
+            mask = mask.to(device)
+        
+        # Validate shapes match
+        if key.size(0) != batch_size or value.size(0) != batch_size:
+            raise ValueError(f"Batch size mismatch: query={batch_size}, key={key.size(0)}, value={value.size(0)}")
+        
+        if query.size(2) != self.d_model or key.size(2) != self.d_model or value.size(2) != self.d_model:
+            raise ValueError(f"d_model mismatch: expected {self.d_model}, "
+                           f"got query={query.size(2)}, key={key.size(2)}, value={value.size(2)}")
         
         # Linear transformations and reshape for multi-head attention
-        Q = self.w_q(query).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
-        K = self.w_k(key).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
-        V = self.w_v(value).view(batch_size, -1, self.n_heads, self.d_k).transpose(1, 2)
+        Q = self.w_q(query).view(batch_size, seq_len, self.n_heads, self.d_k).transpose(1, 2)
+        K = self.w_k(key).view(batch_size, key.size(1), self.n_heads, self.d_k).transpose(1, 2)
+        V = self.w_v(value).view(batch_size, value.size(1), self.n_heads, self.d_k).transpose(1, 2)
         
         # Apply attention
         attention_output, attention_weights = self.scaled_dot_product_attention(Q, K, V, mask)
         
         # Concatenate heads
         attention_output = attention_output.transpose(1, 2).contiguous().view(
-            batch_size, -1, self.d_model
+            batch_size, seq_len, self.d_model
         )
         
         # Final linear transformation
@@ -187,7 +208,10 @@ class TransformerBlock(nn.Module):
 
 class UsernameTransformer(nn.Module):
     """
-    Transformer model for username prediction from action sequences with multitoken context.
+    Transformer model for username prediction from action sequences with context features.
+    
+    Context (browser, duration_bucket, speed_bucket) is embedded and concatenated as features
+    with the pooled action sequence embeddings, not added to the sequence.
     
     During training: Takes (username, action_sequence, browser, duration_bucket, speed_bucket) tuples
     During inference: Takes (action_sequence, browser, duration_bucket, speed_bucket) and predicts username
@@ -204,10 +228,8 @@ class UsernameTransformer(nn.Module):
         dropout: float = 0.1,
         n_usernames: int = None,
         discrete_contexts: dict = None, # multitoken context for (browser, duration, action_speed)
-        use_token_statistics: bool = True, # Whether to include token distribution statistics
         token_stats_top_k: int = 10, # Number of top frequent tokens to include
         token_stats_dim: int = None, # Dimension of token statistics features (auto-computed if None)
-        context_as_features: bool = True # If True, context tokens are concatenated as features (like statistics). If False, they're added as sequence tokens.
     ):
         super().__init__()
         
@@ -216,9 +238,7 @@ class UsernameTransformer(nn.Module):
         self.n_usernames = n_usernames
         self.discrete_contexts = discrete_contexts if discrete_contexts is not None else {}
         self.n_contexts = len(self.discrete_contexts)
-        self.use_token_statistics = use_token_statistics
         self.token_stats_top_k = token_stats_top_k
-        self.context_as_features = context_as_features
         
         # Compute token statistics feature dimension
         # top_k + entropy + unique_ratio + seq_len + diversity
@@ -236,17 +256,18 @@ class UsernameTransformer(nn.Module):
             for name, n_values in self.discrete_contexts.items()
         })
         
-        # Username embedding (for training)
-        self.username_embedding = nn.Embedding(n_usernames, d_model)
-        
-        # Positional encoding (only increased if context tokens are in sequence)
-        if self.context_as_features:
-            self.pos_encoding = PositionalEncoding(d_model, max_seq_len)
+        # Note: username_embedding is not used in forward pass, only in loss calculation
+        # We keep it for potential future use but don't use it currently
+        if n_usernames is not None:
+            self.username_embedding = nn.Embedding(n_usernames, d_model)
         else:
-            self.pos_encoding = PositionalEncoding(d_model, max_seq_len + self.n_contexts)
+            self.username_embedding = None
         
-        # If context as features, create embedding layer to map context embeddings to feature space
-        if self.context_as_features and self.n_contexts > 0:
+        # Positional encoding (only for action sequences, contexts are features)
+        self.pos_encoding = PositionalEncoding(d_model, max_seq_len)
+        
+        # Context embeddings are used as features (concatenated with pooled action embeddings)
+        if self.n_contexts > 0:
             # Each context is embedded to d_model, we'll concatenate all and embed to d_model // 4
             self.context_features_embedding = nn.Sequential(
                 nn.Linear(self.n_contexts * d_model, d_model // 2),
@@ -268,18 +289,15 @@ class UsernameTransformer(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.layer_norm = nn.LayerNorm(d_model)
         
-        # Token statistics embedding (if enabled)
-        if self.use_token_statistics:
-            # Embed token statistics into d_model space
-            self.token_stats_embedding = nn.Sequential(
-                nn.Linear(self.token_stats_dim, d_model // 2),
-                nn.ReLU(),
-                nn.Dropout(dropout),
-                nn.Linear(d_model // 2, d_model // 4)
-            )
-            stats_features_size = d_model // 4
-        else:
-            stats_features_size = 0
+        # Token statistics embedding (always enabled)
+        # Embed token statistics into d_model space
+        self.token_stats_embedding = nn.Sequential(
+            nn.Linear(self.token_stats_dim, d_model // 2),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(d_model // 2, d_model // 4)
+        )
+        stats_features_size = d_model // 4
         
         # Combined input size for classifier: d_model (from transformer) + stats + context features
         classifier_input_size = d_model + stats_features_size + context_features_size
@@ -306,6 +324,83 @@ class UsernameTransformer(nn.Module):
         """Create padding mask for variable length sequences."""
         return (seq != 0).unsqueeze(1).unsqueeze(2)
     
+    def _validate_inputs(self, action_sequence, browser=None, duration_bucket=None, speed_bucket=None, username=None):
+        """
+        Comprehensive input validation to prevent runtime errors.
+        
+        Returns validated and clamped tensors.
+        """
+        # Validate action_sequence
+        if not isinstance(action_sequence, torch.Tensor):
+            raise TypeError(f"action_sequence must be a torch.Tensor, got {type(action_sequence)}")
+        
+        if action_sequence.dim() != 2:
+            raise ValueError(f"action_sequence must be 2D (batch_size, seq_len), got shape {action_sequence.shape}")
+        
+        batch_size, seq_len = action_sequence.shape
+        if batch_size == 0:
+            raise ValueError("batch_size must be > 0")
+        
+        # Clamp action_sequence token IDs to valid range
+        action_sequence = torch.clamp(action_sequence.long(), 0, self.vocab_size - 1)
+        
+        # Validate and clamp context IDs
+        if browser is not None:
+            if not isinstance(browser, torch.Tensor):
+                browser = torch.tensor(browser, dtype=torch.long, device=action_sequence.device)
+            if browser.dim() == 0:
+                browser = browser.unsqueeze(0)
+            if browser.size(0) != batch_size:
+                raise ValueError(f"browser batch size {browser.size(0)} != action_sequence batch size {batch_size}")
+            browser = browser.to(action_sequence.device)
+            n_browsers = self.discrete_contexts.get('browser', 0)
+            if n_browsers > 0:
+                browser = torch.clamp(browser.long(), 0, n_browsers - 1)
+            elif 'browser' in self.discrete_contexts:
+                raise ValueError(f"browser provided but browser embedding not initialized (n_browsers={n_browsers})")
+        
+        if duration_bucket is not None:
+            if not isinstance(duration_bucket, torch.Tensor):
+                duration_bucket = torch.tensor(duration_bucket, dtype=torch.long, device=action_sequence.device)
+            if duration_bucket.dim() == 0:
+                duration_bucket = duration_bucket.unsqueeze(0)
+            if duration_bucket.size(0) != batch_size:
+                raise ValueError(f"duration_bucket batch size {duration_bucket.size(0)} != action_sequence batch size {batch_size}")
+            duration_bucket = duration_bucket.to(action_sequence.device)
+            n_duration = self.discrete_contexts.get('duration_bucket', 0)
+            if n_duration > 0:
+                duration_bucket = torch.clamp(duration_bucket.long(), 0, n_duration - 1)
+            elif 'duration_bucket' in self.discrete_contexts:
+                raise ValueError(f"duration_bucket provided but duration embedding not initialized (n_duration={n_duration})")
+        
+        if speed_bucket is not None:
+            if not isinstance(speed_bucket, torch.Tensor):
+                speed_bucket = torch.tensor(speed_bucket, dtype=torch.long, device=action_sequence.device)
+            if speed_bucket.dim() == 0:
+                speed_bucket = speed_bucket.unsqueeze(0)
+            if speed_bucket.size(0) != batch_size:
+                raise ValueError(f"speed_bucket batch size {speed_bucket.size(0)} != action_sequence batch size {batch_size}")
+            speed_bucket = speed_bucket.to(action_sequence.device)
+            n_speed = self.discrete_contexts.get('speed_bucket', 0)
+            if n_speed > 0:
+                speed_bucket = torch.clamp(speed_bucket.long(), 0, n_speed - 1)
+            elif 'speed_bucket' in self.discrete_contexts:
+                raise ValueError(f"speed_bucket provided but speed embedding not initialized (n_speed={n_speed})")
+        
+        # Validate username if provided
+        if username is not None:
+            if not isinstance(username, torch.Tensor):
+                username = torch.tensor(username, dtype=torch.long, device=action_sequence.device)
+            if username.dim() == 0:
+                username = username.unsqueeze(0)
+            if username.size(0) != batch_size:
+                raise ValueError(f"username batch size {username.size(0)} != action_sequence batch size {batch_size}")
+            username = username.to(action_sequence.device)
+            if self.n_usernames is not None:
+                username = torch.clamp(username.long(), 0, self.n_usernames - 1)
+        
+        return action_sequence, browser, duration_bucket, speed_bucket, username
+    
     def forward(self, action_sequence, browser=None, duration_bucket=None, speed_bucket=None, username=None, training=True):
         """
         Forward pass of the transformer with multitoken context.
@@ -322,58 +417,45 @@ class UsernameTransformer(nn.Module):
             If training: (username_logits, action_embeddings)
             If inference: username_logits
         """
+        # Comprehensive input validation
+        action_sequence, browser, duration_bucket, speed_bucket, username = self._validate_inputs(
+            action_sequence, browser, duration_bucket, speed_bucket, username
+        )
+        
         batch_size, seq_len = action_sequence.shape
         
-        # Collect context embeddings
+        # Collect context embeddings (used as features, not sequence tokens)
         context_features_list = []
-        context_embs = []
-        context_masks = []
         
         if browser is not None:
+            # Safety check: ensure browser IDs are valid
+            if 'browser' not in self.context_embeddings:
+                raise ValueError("browser embedding not found in context_embeddings")
             browser_emb = self.context_embeddings['browser'](browser) * math.sqrt(self.d_model)  # (batch_size, d_model)
             context_features_list.append(browser_emb)
-            if not self.context_as_features:
-                browser_emb = browser_emb.unsqueeze(1)  # (batch_size, 1, d_model)
-                context_embs.append(browser_emb)
-                context_masks.append(torch.ones(batch_size, 1, 1, 1, device=action_sequence.device))
         
         if duration_bucket is not None:
+            # Safety check: ensure duration_bucket IDs are valid
+            if 'duration_bucket' not in self.context_embeddings:
+                raise ValueError("duration_bucket embedding not found in context_embeddings")
             duration_emb = self.context_embeddings['duration_bucket'](duration_bucket) * math.sqrt(self.d_model)  # (batch_size, d_model)
             context_features_list.append(duration_emb)
-            if not self.context_as_features:
-                duration_emb = duration_emb.unsqueeze(1)  # (batch_size, 1, d_model)
-                context_embs.append(duration_emb)
-                context_masks.append(torch.ones(batch_size, 1, 1, 1, device=action_sequence.device))
         
         if speed_bucket is not None:
+            # Safety check: ensure speed_bucket IDs are valid
+            if 'speed_bucket' not in self.context_embeddings:
+                raise ValueError("speed_bucket embedding not found in context_embeddings")
             speed_emb = self.context_embeddings['speed_bucket'](speed_bucket) * math.sqrt(self.d_model)  # (batch_size, d_model)
             context_features_list.append(speed_emb)
-            if not self.context_as_features:
-                speed_emb = speed_emb.unsqueeze(1)  # (batch_size, 1, d_model)
-                context_embs.append(speed_emb)
-                context_masks.append(torch.ones(batch_size, 1, 1, 1, device=action_sequence.device))
 
         # Token embeddings for actions
-        action_emb = self.token_embedding(action_sequence) * math.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
+        # Safety check: ensure all tokens are valid before embedding lookup
+        action_sequence_clean = action_sequence.clamp(0, self.vocab_size - 1)
+        action_emb = self.token_embedding(action_sequence_clean) * math.sqrt(self.d_model)  # (batch_size, seq_len, d_model)
         
-        # Process through transformer
-        if self.context_as_features:
-            # Context tokens are NOT in the sequence - only action tokens
-            x = action_emb
-            mask = self.create_padding_mask(action_sequence)  # (batch_size, 1, 1, seq_len)
-        else:
-            # Context tokens ARE in the sequence (original approach)
-            if context_embs:
-                x = torch.cat(context_embs + [action_emb], dim=1)  # (batch_size, n_contexts + seq_len, d_model)
-            else:
-                x = action_emb
-            
-            # Create padding mask (extend for context tokens)
-            action_mask = self.create_padding_mask(action_sequence)  # (batch_size, 1, 1, seq_len)
-            if context_masks:
-                mask = torch.cat(context_masks + [action_mask], dim=-1)  # (batch_size, 1, 1, n_contexts + seq_len)
-            else:
-                mask = action_mask
+        # Process through transformer (only action tokens, no context tokens in sequence)
+        x = action_emb
+        mask = self.create_padding_mask(action_sequence)  # (batch_size, 1, 1, seq_len)
         
         # Add positional encoding
         x = self.pos_encoding(x)
@@ -386,18 +468,16 @@ class UsernameTransformer(nn.Module):
         # Apply layer norm
         x = self.layer_norm(x)
         
-        # Global average pooling over sequence length
-        mask_expanded = mask.squeeze(1).squeeze(1).float()  # (batch_size, seq_len) or (batch_size, n_contexts + seq_len)
+        # Global average pooling over sequence length (only action tokens)
+        mask_expanded = mask.squeeze(1).squeeze(1).float()  # (batch_size, seq_len)
+        action_tokens = x  # (batch_size, seq_len, d_model)
+        action_mask = mask_expanded  # (batch_size, seq_len)
         
-        if self.context_as_features:
-            # Pool over all action tokens (no context tokens in sequence)
-            action_tokens = x  # (batch_size, seq_len, d_model)
-            action_mask = mask_expanded  # (batch_size, seq_len)
-        else:
-            # Pool only over action tokens (skip context tokens at the beginning)
-            n_actual_contexts = len(context_embs)
-            action_tokens = x[:, n_actual_contexts:, :]  # (batch_size, seq_len, d_model)
-            action_mask = mask_expanded[:, n_actual_contexts:]  # (batch_size, seq_len)
+        # Safety check: ensure mask has valid dimensions
+        if action_mask.dim() != 2:
+            raise RuntimeError(f"action_mask must be 2D, got shape {action_mask.shape}")
+        if action_tokens.dim() != 3:
+            raise RuntimeError(f"action_tokens must be 3D, got shape {action_tokens.shape}")
         
         x_masked = action_tokens * action_mask.unsqueeze(-1)
         denom = action_mask.sum(dim=1, keepdim=True)
@@ -409,28 +489,27 @@ class UsernameTransformer(nn.Module):
         # Collect all features to concatenate
         feature_list = [pooled]
         
-        # Add context as features (if enabled)
-        if self.context_as_features and len(context_features_list) > 0:
+        # Add context as features
+        if len(context_features_list) > 0:
             # Concatenate all context embeddings
             context_features = torch.cat(context_features_list, dim=1)  # (batch_size, n_contexts * d_model)
             # Embed context features
             context_embedded = self.context_features_embedding(context_features)  # (batch_size, d_model // 4)
             feature_list.append(context_embedded)
         
-        # Add token distribution statistics if enabled
-        if self.use_token_statistics:
-            # Compute token statistics for the batch
-            token_stats = compute_token_statistics_batch(
-                action_sequence,
-                vocab_size=self.vocab_size,
-                top_k=self.token_stats_top_k,
-                include_entropy=True,
-                include_diversity=True
-            ).to(pooled.device)
-            
-            # Embed statistics into d_model space
-            stats_embedded = self.token_stats_embedding(token_stats)  # (batch_size, d_model // 4)
-            feature_list.append(stats_embedded)
+        # Add token distribution statistics
+        # Compute token statistics for the batch
+        token_stats = compute_token_statistics_batch(
+            action_sequence,
+            vocab_size=self.vocab_size,
+            top_k=self.token_stats_top_k,
+            include_entropy=True,
+            include_diversity=True
+        ).to(pooled.device)
+        
+        # Embed statistics into d_model space
+        stats_embedded = self.token_stats_embedding(token_stats)  # (batch_size, d_model // 4)
+        feature_list.append(stats_embedded)
         
         # Concatenate all features
         combined_features = torch.cat(feature_list, dim=1)  # (batch_size, d_model + context_features + stats_features)
@@ -574,10 +653,8 @@ def create_model(vocab_size, n_usernames, discrete_contexts=None, **kwargs):
         d_ff=kwargs.get('d_ff', 512),
         max_seq_len=kwargs.get('max_seq_len', 500),
         dropout=kwargs.get('dropout', 0.15),
-        use_token_statistics=kwargs.get('use_token_statistics', True),
         token_stats_top_k=kwargs.get('token_stats_top_k', 10),
-        token_stats_dim=kwargs.get('token_stats_dim', None),
-        context_as_features=kwargs.get('context_as_features', True)  # Default: context as features for consistency
+        token_stats_dim=kwargs.get('token_stats_dim', None)
     )
 
 def train_model(model, train_data, val_data, learning_rate=1e-5, epochs=50, batch_size=8, max_seq_len=100, device='cpu'):
