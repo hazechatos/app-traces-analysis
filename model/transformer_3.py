@@ -68,7 +68,27 @@ class MultiHeadAttention(nn.Module):
         scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(self.d_k)
         
         if mask is not None:
-            scores = scores.masked_fill(mask == 0, -1e9)
+            # Expand mask to match scores shape: (batch_size, n_heads, seq_len, seq_len)
+            # mask comes in as (batch_size, 1, 1, seq_len) - indicates which key positions are valid
+            # We need to mask out positions where the key (last dimension) is padding
+            # Expand mask: (batch_size, 1, 1, seq_len) -> (batch_size, n_heads, seq_len, seq_len)
+            # where each query position has the same mask values (masking padding keys)
+            if mask.dim() == 4:
+                # mask shape: (batch_size, 1, 1, seq_len)
+                # Get seq_len from scores to ensure matching
+                seq_len_q, seq_len_k = scores.size(-2), scores.size(-1)
+                # Remove middle dimensions: (batch_size, 1, 1, seq_len) -> (batch_size, seq_len)
+                mask_1d = mask.squeeze(1).squeeze(1)  # (batch_size, seq_len_k)
+                # Expand to full attention matrix shape: (batch_size, n_heads, seq_len_q, seq_len_k)
+                # For each query position, apply the same key mask
+                mask_expanded = mask_1d.unsqueeze(1).unsqueeze(1)  # (batch_size, 1, 1, seq_len_k)
+                mask_expanded = mask_expanded.expand(-1, self.n_heads, seq_len_q, -1)  # (batch_size, n_heads, seq_len_q, seq_len_k)
+            else:
+                # Fallback: try to expand if possible
+                mask_expanded = mask.expand(-1, self.n_heads, -1, -1) if mask.dim() == 4 else mask
+            
+            # Apply mask: mask out positions where mask == 0
+            scores = scores.masked_fill(mask_expanded == 0, -1e9)
         
         attention_weights = F.softmax(scores, dim=-1)
         attention_weights = self.dropout(attention_weights)
