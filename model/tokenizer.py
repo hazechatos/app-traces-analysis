@@ -1,7 +1,6 @@
 from .parser import parse_action_string
 import re
 import pandas as pd
-import numpy as np
 
 def tokenize_action_sequence(actions: pd.DataFrame, existing_token_to_idx: dict = None, training = True):
     """
